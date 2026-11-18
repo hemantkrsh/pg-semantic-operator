@@ -1,0 +1,71 @@
+# System One operator MVP.
+# Postgres calls a local decision model through a custom SQL operator.
+# First start downloads weights. Later starts can run fully offline.
+
+name: pg-system-one
+
+services:
+  strands-model:
+    build:
+      context: ./docker/strands-model
+      args:
+        PYTHON_IMAGE: python:3.11-slim
+    image: pg-system-one/strands-model:local
+    command:
+      - strands-decider
+      - serve
+      - StrandsAgents/strands-decider-2B-hobson-v19
+      # Default bind is 127.0.0.1. Other containers need 0.0.0.0.
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - "8000:8000"
+    environment:
+      # Weights live in the volume below.
+      HF_HOME: /cache/huggingface
+      # Set to 1 after the first successful start to forbid any network access.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    volumes:
+      - hf-cache:/cache/huggingface
+    healthcheck:
+      # A TCP probe on the container's network address, not loopback.
+      # It fails if the server binds only to 127.0.0.1.
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection((socket.gethostbyname(socket.gethostname()), 8000), 2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      # The first run downloads the model. Give it time.
+      start_period: 15m
+    restart: unless-stopped
+
+  postgres-db:
+    build:
+      context: ./docker/postgres-db
+    image: pg-system-one/postgres-db:local
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-systemone}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-systemone}
+      POSTGRES_DB: ${POSTGRES_DB:-systemone}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      # Runs once, on an empty data volume.
+      - ./init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+      - ./demo_queries.sql:/demo/demo_queries.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      strands-model:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  hf-cache:
+  pg-data:
